@@ -1,4 +1,5 @@
 import json
+import base64
 import re
 from pathlib import Path
 
@@ -12,6 +13,12 @@ import streamlit as st
 ARTICLE_FOLDER = Path("article_files")
 ANNOTATION_FOLDER = Path("annotations")
 SYSTEM_PROMPT_FILE = Path("system_prompt.txt")
+ANNOTATION_GUIDE_PDF = Path("STOMP_annotation_guide.pdf")
+KNOWN_YES_FILE = Path("AllSubsampleYes.txt")
+
+# Number of articles assigned to each annotator.
+# Change this to 20 if you prefer 20 articles per annotator.
+NUMBER_OF_BATCHES = 10
 
 ANNOTATION_FOLDER.mkdir(exist_ok=True)
 
@@ -34,6 +41,39 @@ Q2_TEXT = (
 # =========================================================
 # FUNCTIONS
 # =========================================================
+
+def show_pdf(pdf_path, height=700):
+    """Display a local PDF inside the Streamlit page and provide a download button."""
+    if not pdf_path.exists():
+        st.warning(
+            f"{pdf_path.name} was not found. Please add it to the same GitHub "
+            "repository as this app."
+        )
+        return
+
+    pdf_bytes = pdf_path.read_bytes()
+    base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+
+    st.markdown(
+        f"""
+        <iframe
+            src="data:application/pdf;base64,{base64_pdf}"
+            width="100%"
+            height="{height}"
+            type="application/pdf">
+        </iframe>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.download_button(
+        "⬇ Download STOMP Annotation Guide (PDF)",
+        data=pdf_bytes,
+        file_name=pdf_path.name,
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
 
 def natural_sort_key(path):
     """Sort filenames numerically where possible."""
@@ -104,6 +144,8 @@ def empty_annotation(article_id):
         "articleid": str(article_id),
         "q1": None,
         "q2": [],
+        "common_space_type": None,
+        "ownership": None,
         "notes": ""
     }
 
@@ -138,26 +180,104 @@ def safe_annotator_name(name):
     return name
 
 
-def annotation_file_path(annotator, familiarity):
+def load_known_yes_ids():
     """
+    Read known Common Space = Yes article IDs from AllSubsampleYes.txt.
+    Example line: 2016-06:7438
+    """
+    yes_ids = set()
+
+    if not KNOWN_YES_FILE.exists():
+        return yes_ids
+
+    for line in KNOWN_YES_FILE.read_text(
+        encoding="utf-8",
+        errors="replace"
+    ).splitlines():
+
+        if ":" not in line:
+            continue
+
+        _, values = line.split(":", 1)
+        values = values.strip()
+
+        if not values:
+            continue
+
+        for value in values.split(","):
+            value = value.strip()
+            if value:
+                yes_ids.add(value)
+
+    return yes_ids
+
+
+def make_representative_batches(article_paths, number_of_batches):
+    """
+    Create fixed batches with a similar proportion of known-Yes articles
+    in every batch.
+
+    The remaining articles form a mixed pool that may include Maybe and No.
+    Articles are distributed round-robin so each batch also contains IDs
+    from across the full article range.
+    """
+    known_yes_ids = load_known_yes_ids()
+
+    yes_paths = []
+    other_paths = []
+
+    for path in article_paths:
+        if path.stem in known_yes_ids:
+            yes_paths.append(path)
+        else:
+            other_paths.append(path)
+
+    yes_paths = sorted(yes_paths, key=natural_sort_key)
+    other_paths = sorted(other_paths, key=natural_sort_key)
+
+    batches = [[] for _ in range(number_of_batches)]
+
+    # Spread known Yes articles evenly across batches.
+    for i, path in enumerate(yes_paths):
+        batches[i % number_of_batches].append(path)
+
+    # Spread the remaining mixed Maybe/No pool evenly across batches.
+    # Offset the starting batch to avoid the same ordering pattern.
+    offset = len(yes_paths) % number_of_batches
+
+    for i, path in enumerate(other_paths):
+        batches[(i + offset) % number_of_batches].append(path)
+
+    # Keep each batch in natural article-ID order for easier navigation.
+    for batch in batches:
+        batch.sort(key=natural_sort_key)
+
+    return batches, known_yes_ids
+
+
+def annotation_file_path(annotator, familiarity, batch_id):
+    """
+    Temporary server-side file for one annotator + one batch.
+
     Examples:
-    annotations/matt_1.jsonl
-    annotations/andy_3.jsonl
+    annotations/matt_1_B01.jsonl
+    annotations/andy_3_B07.jsonl
     """
 
     clean_name = safe_annotator_name(annotator)
 
     return (
         ANNOTATION_FOLDER
-        / f"{clean_name}_{familiarity}.jsonl"
+        / f"{clean_name}_{familiarity}_{batch_id}.jsonl"
     )
 
 
-def load_saved_annotations(annotator, familiarity):
-    """Read existing JSONL annotations for this annotator."""
+def load_saved_annotations(annotator, familiarity, batch_id):
+    """Read existing JSONL annotations for this annotator and batch."""
     path = annotation_file_path(
         annotator,
-        familiarity
+        familiarity,
+        batch_id
     )
 
     saved = {}
@@ -194,6 +314,7 @@ def load_saved_annotations(annotator, familiarity):
 def save_all_annotations(
     annotator,
     familiarity,
+    batch_id,
     annotations,
     articles
 ):
@@ -205,7 +326,8 @@ def save_all_annotations(
 
     path = annotation_file_path(
         annotator,
-        familiarity
+        familiarity,
+        batch_id
     )
 
     with path.open(
@@ -225,9 +347,9 @@ def save_all_annotations(
 
             # Only save articles that have Q1 answered
             if item.get("q1") not in {
-                "Y",
-                "N",
-                "?"
+                "Yes",
+                "No",
+                "Maybe"
             }:
                 continue
 
@@ -264,10 +386,9 @@ if not article_paths:
     st.stop()
 
 
-articles = [
-    load_article(path)
-    for path in article_paths
-]
+# Keep the full list as paths first. We will load only the batch assigned
+# to the current annotator after they enter their name.
+all_article_paths = article_paths
 
 
 # =========================================================
@@ -279,6 +400,31 @@ st.title("STOMP Human Annotation")
 st.caption(
     "Human annotation interface for STOMP articles"
 )
+
+
+with st.expander("🧭 How to annotate — step-by-step", expanded=True):
+    st.markdown(
+        """
+1. Enter your information — Enter your name, select your STOMP familiarity, and choose your assigned batch.
+2. Read the article — Read the headline and article carefully. You can copy the text if needed.
+3. Read the annotation guide — Read the STOMP Annotation Guide before you begin.
+4. Answer the questions — Answer all questions based on the article and the guide.
+5. Save and continue — Click Save & Next to move to the next article. Use Previous to review earlier articles.
+6. Download your JSONL — Download your file every 5–10 articles and again after finishing your batch.
+        """
+    )
+
+with st.expander("📘 STOMP Annotation Guide (PDF)", expanded=False):
+
+    st.write(
+        "Open the guide below for definitions and examples of common spaces, "
+        "common space types, and ownership."
+    )
+
+    st.pdf(
+        "STOMP_annotation_guide.pdf",
+        height=720
+    )
 
 
 # =========================================================
@@ -324,9 +470,60 @@ clean_annotator = safe_annotator_name(
     annotator_name
 )
 
+# Batch is added below after the annotator selects it.
 annotator_session_id = (
     f"{clean_annotator}_{familiarity}"
 )
+
+
+# =========================================================
+# CHOOSE A FIXED REPRESENTATIVE BATCH
+# =========================================================
+
+batches, known_yes_ids = make_representative_batches(
+    all_article_paths,
+    NUMBER_OF_BATCHES
+)
+
+batch_options = list(range(1, NUMBER_OF_BATCHES + 1))
+
+batch_number = st.sidebar.selectbox(
+    "Assigned Batch",
+    options=batch_options,
+    index=None,
+    placeholder="Choose your assigned batch",
+    format_func=lambda x: f"Batch {x:02d}",
+    help=(
+        "Please use the batch number assigned to you by the research team. "
+        "Each batch contains roughly 20–30 articles with a similar mix of "
+        "known Yes articles and the remaining Maybe/No pool."
+    )
+)
+
+if batch_number is None:
+    st.info(
+        "Please choose your assigned batch in the sidebar to begin."
+    )
+    st.stop()
+
+assigned_paths = batches[batch_number - 1]
+
+# Only the selected batch is loaded into this annotator's session.
+articles = [
+    load_article(path)
+    for path in assigned_paths
+]
+
+batch_id = f"B{batch_number:02d}"
+
+# This count is for researcher verification only; it is not shown to
+# annotators as a list of which specific articles are known Yes.
+batch_known_yes_count = sum(
+    1 for path in assigned_paths
+    if path.stem in known_yes_ids
+)
+
+annotator_session_id = f"{clean_annotator}_{familiarity}_{batch_id}"
 
 
 # =========================================================
@@ -349,7 +546,8 @@ if (
     st.session_state.annotations = (
         load_saved_annotations(
             annotator_name,
-            familiarity
+            familiarity,
+            batch_id
         )
     )
 
@@ -421,9 +619,9 @@ completed = sum(
     1
     for item in st.session_state.annotations.values()
     if item.get("q1") in {
-        "Y",
-        "N",
-        "?"
+        "Yes",
+        "No",
+        "Maybe"
     }
 )
 
@@ -439,12 +637,17 @@ st.sidebar.write(
 )
 
 st.sidebar.write(
+    f"**Assigned batch:** {batch_id} ({len(articles)} articles)"
+)
+
+st.sidebar.write(
     f"**Completed:** {completed} / {len(articles)}"
 )
 
 st.sidebar.progress(
     completed / len(articles)
 )
+
 
 
 # =========================================================
@@ -489,36 +692,51 @@ with article_column:
 
     st.markdown("---")
 
-    st.text_area(
-        "Article Text",
-        value=article[
-            "article_text"
-        ],
-        height=750,
-        disabled=True,
-        key=f"article_text_{article_id}"
+    # Selectable/copyable article text with high-contrast dark text.
+    # st.text_area(..., disabled=True) can appear light grey in some themes.
+    import html
+
+    safe_article_text = html.escape(article["article_text"]).replace("\n", "<br>")
+
+    st.markdown(
+        f"""
+        <div style="
+            height: 750px;
+            overflow-y: auto;
+            padding: 18px;
+            border: 1px solid rgba(128,128,128,0.35);
+            border-radius: 8px;
+            background: white;
+            color: #111111;
+            font-size: 16px;
+            line-height: 1.6;
+            white-space: normal;
+            user-select: text;
+            -webkit-user-select: text;
+        ">
+            {safe_article_text}
+        </div>
+        """,
+        unsafe_allow_html=True
     )
+
+    st.caption("Tip: You can select and copy text directly from the article above.")
 
 
 # =========================================================
 # RIGHT SIDE: ANNOTATION
 # =========================================================
-
 with annotation_column:
 
-    st.header(
-        "Annotation"
-    )
+    st.header("Annotation")
 
-    q1_options = [
-        "Y",
-        "N",
-        "?"
-    ]
+    # =====================================================
+    # Q1
+    # =====================================================
 
-    existing_q1 = annotation.get(
-        "q1"
-    )
+    q1_options = ["Yes", "No", "Maybe"]
+
+    existing_q1 = annotation.get("q1")
 
     q1_index = (
         q1_options.index(existing_q1)
@@ -534,58 +752,100 @@ with annotation_column:
         key=f"q1_{article_id}"
     )
 
-    if q1 == "Y":
-        st.success(
-            "Y = Yes"
+    # =====================================================
+    # Q2 (Only for Yes or Maybe)
+    # =====================================================
+
+    if q1 in ["Yes", "Maybe"]:
+
+        st.markdown("---")
+
+        q2 = st.text_area(
+            "Q2. If Q1 is Yes or Maybe, quote the specific common space(s) identified.",
+            value=array_to_text(annotation.get("q2", [])),
+            height=130,
+            placeholder="""Example:
+void deck
+coffee shop
+park""",
+            help="Enter one common space per line.",
+            key=f"q2_{article_id}"
         )
 
-    elif q1 == "N":
-        st.info(
-            "N = No"
+    else:
+        q2 = ""
+
+    # =====================================================
+    # Q3 & Q4 (Only for Yes)
+    # =====================================================
+
+    common_space_type = annotation.get("common_space_type")
+    ownership = annotation.get("ownership")
+
+    if q1 == "Yes":
+
+        st.markdown("---")
+
+        common_space_type_options = [
+            "Neighborhood common space",
+            "Civic common space",
+            "Membership common space",
+            "None of these"
+        ]
+
+        existing_type = annotation.get("common_space_type")
+
+        type_index = (
+            common_space_type_options.index(existing_type)
+            if existing_type in common_space_type_options
+            else None
         )
 
-    elif q1 == "?":
-        st.warning(
-            "? = Maybe / Unclear"
+        common_space_type = st.radio(
+            "Q3. Is the common space a:",
+            options=common_space_type_options,
+            index=type_index,
+            key=f"common_space_type_{article_id}"
         )
 
-    st.markdown("---")
+        ownership_options = [
+            "Public ownership",
+            "Private ownership",
+            "Mixed ownership"
+        ]
 
-    q2 = st.text_area(
-        f"Q2. {Q2_TEXT}",
-        value=array_to_text(
-            annotation.get(
-                "q2",
-                []
-            )
-        ),
-        height=130,
-        placeholder=(
-            "One exact quotation per line"
-        ),
-        help=(
-            "Enter one exact quotation per line. "
-            "Leave blank if it is not applicable."
-        ),
-        key=f"q2_{article_id}"
-    )
+        existing_owner = annotation.get("ownership")
+
+        owner_index = (
+            ownership_options.index(existing_owner)
+            if existing_owner in ownership_options
+            else None
+        )
+
+        ownership = st.radio(
+            "Q4. Which of the following best describes the ownership of the common space?",
+            options=ownership_options,
+            index=owner_index,
+            key=f"ownership_{article_id}"
+        )
+
+    else:
+        common_space_type = None
+        ownership = None
+
+    # =====================================================
+    # NOTES
+    # =====================================================
 
     st.markdown("---")
 
     notes = st.text_area(
         "Notes (optional)",
-        value=annotation.get(
-            "notes",
-            ""
-        ),
+        value=annotation.get("notes", ""),
         height=120,
-        placeholder=(
-            "Add anything else you would like to note about this article."
-        ),
+        placeholder="Add any comments here...",
         key=f"notes_{article_id}"
     )
-
-
 # =========================================================
 # SAVE CURRENT ARTICLE
 # =========================================================
@@ -596,6 +856,8 @@ def save_current_annotation():
         "articleid": article_id,
         "q1": q1,
         "q2": text_to_array(q2),
+        "common_space_type": common_space_type,
+        "ownership": ownership,
         "notes": notes.strip()
     }
 
@@ -606,6 +868,7 @@ def save_current_annotation():
     save_all_annotations(
         annotator_name,
         familiarity,
+        batch_id,
         st.session_state.annotations,
         articles
     )
@@ -707,9 +970,9 @@ for article_item in articles:
     )
 
     if saved_item.get("q1") not in {
-        "Y",
-        "N",
-        "?"
+        "Yes",
+        "No",
+        "Maybe"
     }:
         continue
 
@@ -727,9 +990,14 @@ jsonl_output = "\n".join(
 
 
 download_filename = (
-    f"{clean_annotator}_{familiarity}.jsonl"
+    f"{clean_annotator}_{familiarity}_{batch_id}.jsonl"
 )
 
+
+st.sidebar.caption(
+    "Important: Download your JSONL backup every 5–10 articles and before "
+    "closing or refreshing the browser. Streamlit Cloud storage is temporary."
+)
 
 st.sidebar.download_button(
     f"⬇ Download {download_filename}",
