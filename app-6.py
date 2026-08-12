@@ -413,10 +413,16 @@ with st.expander("🧭 How to annotate — step-by-step", expanded=True):
     )
 
 with st.expander("📘 STOMP Annotation Guide (PDF)", expanded=False):
+
     st.write(
-        ""
+        "Open the guide below for definitions and examples of common spaces, "
+        "common space types, and ownership."
     )
-    show_pdf(ANNOTATION_GUIDE_PDF, height=720)
+
+    st.pdf(
+        "STOMP_annotation_guide.pdf",
+        height=720
+    )
 
 
 # =========================================================
