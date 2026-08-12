@@ -403,18 +403,24 @@ st.caption(
 with st.expander("🧭 How to annotate — step-by-step", expanded=True):
     st.markdown(
         """
-1. Enter your information — Enter your name, select your STOMP familiarity, and choose your assigned batch.
-2. Read the article — Read the headline and article carefully. You can copy the text if needed.
-3. Read the annotation guide — Read the STOMP Annotation Guide before you begin.
-4. Answer the questions — Answer all questions based on the article and the guide.
-5. Save and continue — Click Save & Next to move to the next article. Use Previous to review earlier articles.
-6. Download your JSONL — Download your file every 5–10 articles and again after finishing your batch.
+        1. **Enter your information** — Enter your name, select your STOMP familiarity, and choose your assigned batch.
+
+        2. **Read the article** — Read the headline and article text carefully. You can select and copy the text.
+
+        3. **Read the annotation guidelines** — Please read the STOMP Annotation Guide before starting the annotation. This is required so that all annotators use the same definitions and criteria.
+
+        4. **Answer the questions** — Answer the questions shown next to the article. You can add a note if needed.
+
+        5. **Save and continue** — Click **Save & Next** to save your answers and go to the next article. Use **Previous** if you want to go back.
+
+        6. **Download your JSONL file** — Download your latest file every 5–10 articles and again when you finish your batch.
         """
     )
 
 with st.expander("📘 STOMP Annotation Guide (PDF)", expanded=False):
     st.write(
-        "Open the guide below for definitions and examples of common spaces, common space types, and ownership."
+        "Open the guide below for definitions and examples of common spaces, "
+        "YES/NO/MAYBE, common-space types, and ownership."
     )
     show_pdf(ANNOTATION_GUIDE_PDF, height=720)
 
