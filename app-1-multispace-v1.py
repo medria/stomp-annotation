@@ -421,7 +421,7 @@ with st.expander("📘 STOMP Annotation Guide (PDF)", expanded=False):
     )
 
     st.pdf(
-        "STOMP_annotation_guide.pdf",
+        "STOMP_annotation_guide_rev.pdf",
         height=720
     )
 
