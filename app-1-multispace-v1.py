@@ -13,7 +13,7 @@ import streamlit as st
 ARTICLE_FOLDER = Path("article_files")
 ANNOTATION_FOLDER = Path("annotations")
 SYSTEM_PROMPT_FILE = Path("system_prompt.txt")
-ANNOTATION_GUIDE_PDF = Path("STOMP_annotation_guide.pdf")
+ANNOTATION_GUIDE_PDF = Path("STOMP_annotation_guide_rev.pdf")
 KNOWN_YES_FILE = Path("AllSubsampleYes.txt")
 
 # Number of articles assigned to each annotator.
